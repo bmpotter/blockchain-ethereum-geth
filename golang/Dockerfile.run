@@ -1,0 +1,9 @@
+
+RUN mkdir -p /tmp/go
+COPY go /tmp/go/
+
+ENV GOROOT /tmp/go
+ENV PATH $GOROOT/bin:$PATH
+
+WORKDIR /
+

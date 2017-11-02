@@ -1,0 +1,18 @@
+
+ARG VERSION
+
+RUN apt-get update && apt-get -y install git gccgo-5 gcc
+RUN update-alternatives --set go /usr/bin/go-5
+WORKDIR /tmp
+RUN git clone https://go.googlesource.com/go
+WORKDIR go/src
+RUN git checkout go$VERSION
+
+RUN GOROOT_BOOTSTRAP=/usr ./make.bash
+RUN apt-get -y remove gccgo-5
+
+ENV GOROOT /tmp/go
+ENV PATH $GOROOT/bin:$PATH
+
+WORKDIR /
+

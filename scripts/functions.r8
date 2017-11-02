@@ -1,0 +1,445 @@
+# functions
+
+
+. $(dirname $0)/globals
+
+
+# non-destructive if passwd and accounts exist and file length > 0
+# if passwd does not exist and accounts does exist, new accounts will be created from passwd
+
+geth_account()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	mkdir -p $ETHEREUM_DIR $COLONUS_DIR
+
+	if [ ! -s "$COLONUS_DIR/passwd" ]
+	then
+		echo "Generating $COLONUS_DIR/passwd" >&3
+		echo $PASSWD >$COLONUS_DIR/passwd
+		echo "Generating $COLONUS_DIR/accounts" >&3
+		geth --datadir $ETHEREUM_DIR $KDF --password $COLONUS_DIR/passwd account new | sed 's/.*{\(.*\)}/\1/' >$COLONUS_DIR/accounts
+		return 0
+	else
+		echo "Using existing $COLONUS_DIR/passwd" >&3
+	fi
+
+	if [ ! -s "$COLONUS_DIR/accounts" ]
+	then
+		echo "Generating $COLONUS_DIR/accounts" >&3
+		geth --datadir $ETHEREUM_DIR $KDF --password $COLONUS_DIR/passwd account new | sed 's/.*{\(.*\)}/\1/' >$COLONUS_DIR/accounts
+	else
+		echo "Using existing $COLONUS_DIR/accounts" >&3
+	fi
+}
+
+
+read_account()
+{
+	ACCOUNT=$(cat $COLONUS_DIR/accounts | head -1)
+	test "$ACCOUNT" || return 1
+	ACCOUNT="0x$(echo $ACCOUNT | sed 's/^0x//')"
+	echo $ACCOUNT
+	return 0
+}
+
+
+# do not return until a ping
+# todo: support a timeout
+
+offline_barrier()
+{
+	START_TIME=$(date +%s)
+	DOUBLE=2
+	while ! ping -c3 $PING_HOST >/dev/null 2>&1
+	do
+		if (( ($(date +%s) - $START_TIME) > DOUBLE ))
+		then
+			echo "${FUNCNAME[0]}: offline $(($(date +%s) - $START_TIME)) sec" 2>&1
+			#DOUBLE=$((DOUBLE * 2)) # may overflow at 2 bil sec, but then you have other probs
+			DOUBLE=$((DOUBLE + 30)) # double too long
+		fi
+		sleep 1
+	done
+}
+
+
+# todo: checksums
+# todo: dump this for light client
+
+geth_getblocks()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	SLICES=25
+
+	if [ "$1" == "CLEAN" ]
+	then
+		rm -rf $ETHEREUM_DIR/$CHAINDATA_DIR
+		rm -f $COLONUS_DIR/getblocks.flag
+	fi
+
+	if [ ! -d "$ETHEREUM_DIR/$CHAINDATA_DIR" -o ! -r "$COLONUS_DIR/getblocks.flag" ]
+	then
+		echo "getting blocks" >&3
+
+		START=$(date +%s)
+
+		while [ ! -r "$COLONUS_DIR/getblocks.flag" ]
+		do
+			offline_barrier >&3
+
+			# todo: http test first to filter list
+
+			BLOCK_SERVERS=$(
+				for i in $BLOCKS_URLS
+				do
+					echo -n "$i "
+					ping -c 5 $i | grep '^rtt'
+				done | sed 's!/! !g' | sort -n -k9 | awk '{print $1}'
+			)
+
+			FAST=$(echo $BLOCK_SERVERS | awk '{print $1}')
+			echo using $FAST >&3
+
+			if ! P=$(curl --speed-limit 1 --speed-time 30 -sL ${FAST}/blockchain.url)
+			then
+				continue
+			fi
+			echo using $FAST/$P >&3
+
+			mkdir -p $ETHEREUM_DIR $COLONUS_DIR
+
+			# single task download:
+			if (( SLICES < 2 ))
+			then
+				if curl --speed-limit 1 --speed-time 30 -sL ${FAST}/$P | gunzip | tar xvpf - -C $ETHEREUM_DIR --strip-components=1
+				then
+					touch $COLONUS_DIR/getblocks.flag
+					break
+				fi
+			else
+				CHAINDIR=/root/chainload
+				rm -rf $CHAINDIR
+				mkdir -p $CHAINDIR
+				if ! axel -q -n $SLICES -o $CHAINDIR http://$FAST/$P
+				then
+					echo "ERROR: axel download fail!" >&3
+					break
+				fi
+
+				cat $CHAINDIR/$P | gunzip -c | tar xvpf - -C $ETHEREUM_DIR --strip-components=1
+				if (( PIPESTATUS[-1] + PIPESTATUS[-2] == 0 ))
+				then
+					rm -rf $CHAINDIR
+					touch $COLONUS_DIR/getblocks.flag
+					break
+				else
+					echo "ERROR: extractiong failure, gunzip rc: $PIPESTATUS[-2], tar rc:  $PIPESTATUS[-1]" >&3
+				fi
+			fi 1>&3 2>&3
+
+			echo "ERROR: SLICES: $SLICES download fail!" >&3
+
+			ls -la $ETHEREUM_DIR $COLONUS_DIR >&3
+		done
+
+		echo "download time: $(( $(date +%s) - $START ))"
+	else
+		echo "using existing blocks" >&3
+	fi
+}
+
+
+geth_getpeers()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	echo "getting peer list" >&3
+
+	PEERS=""
+	while ! test "$PEERS"
+	do
+		for i in $DISCOVERY_URLS
+		do
+			offline_barrier >&3
+			PEERS=( $(curl --speed-limit 1 --speed-time 30 -sL ${i}/peers) )
+			if test "$PEERS"
+			then
+				break
+			fi
+		done
+		sleep 0.1
+	done
+
+    ### number of peers in peer list
+	N_PEERS=${#PEERS[@]}
+	# C(105,3) = 187,460
+	# C(105,4) = 4,780,230
+	### get 4 random peers
+	if (( N_PEERS == 0 ))
+	then
+		echo "got empty list" >&3
+		PEER=""
+	else
+		echo "got peers" >&3
+		PEER="${PEERS[$(( RANDOM % N_PEERS ))]} ${PEERS[$(( RANDOM % N_PEERS ))]} ${PEERS[$(( RANDOM % N_PEERS ))]} ${PEERS[$(( RANDOM % N_PEERS ))]}"
+	fi
+
+	echo $PEER
+}
+
+
+geth_getnetworkid()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	echo "getting networkid" >&3
+
+	NETWORKID=""
+	while ! test "$NETWORKID"
+	do
+		for i in $DISCOVERY_URLS
+		do
+			offline_barrier >&3
+			NETWORKID=$(curl --speed-limit 1 --speed-time 30 -sL ${i}/networkid)
+			if test "$NETWORKID"
+			then
+				echo "got networkid" >&3
+				break
+			fi
+		done
+		sleep 0.1
+	done
+
+	echo $NETWORKID
+}
+
+
+geth_getdiraddr()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	echo "getting directory address" >&3
+
+	mkdir -p $COLONUS_DIR
+
+	DIRADDR=""
+	while ! test "$DIRADDR"
+	do
+		for i in $DISCOVERY_URLS
+		do
+			offline_barrier >&3
+			DIRADDR=$(curl --speed-limit 1 --speed-time 30 -sL ${i}/directory.address)
+			if test "$DIRADDR"
+			then
+ 				echo $DIRADDR >$COLONUS_DIR/directory.address
+				echo "got directory address" >&3
+				break
+			fi
+		done
+		sleep 0.1
+	done
+}
+
+
+geth_getgenesis()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	echo "getting genesis.json" >&3
+
+	mkdir -p $COLONUS_DIR
+
+	while ! test -s $COLONUS_DIR/genesis.json
+	do
+		for i in $DISCOVERY_URLS
+		do
+			offline_barrier >&3
+			if curl --speed-limit 1 --speed-time 30 -sL ${i}/genesis.json >$COLONUS_DIR/genesis.json
+			then
+				echo "got genesis.json" >&3
+				break
+			fi
+		done
+		sleep 0.1
+	done
+}
+
+
+geth_init()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	echo "init genesis block" >&3
+
+	geth --datadir $ETHEREUM_DIR init $COLONUS_DIR/genesis.json 1>&3 2>&3 
+}
+
+
+geth_process()
+{
+	exec 3> >(sed -u "s/^/${FUNCNAME[0]}: /" >&2)
+
+	NETWORKID=$1; shift
+
+	echo "starting geth" >&3
+
+	offline_barrier >&3
+
+	CACHE=128
+	ARCH=$(uname -m)
+	if [ "$ARCH" != "x86_64" ]
+	then
+		CACHE=16
+	fi
+
+	geth \
+	$KDF \
+	--jitvm=false \
+	--datadir $ETHEREUM_DIR \
+	--maxpeers $MAXPEERS \
+	--fast \
+	--shh \
+	--rpcapi "admin,db,eth,debug,miner,net,shh,txpool,personal,web3" \
+	--networkid $NETWORKID \
+	--identity $IDENTITY \
+	--rpc \
+	--rpcaddr "0.0.0.0" \
+	--cache "$CACHE" \
+	--port $PORT --bootnodes $* 1>&3 2>&3
+
+	#--rpcaddr "127.0.0.1" \
+}
+
+
+geth_pid()
+{
+	if pgrep 'geth$'
+	then
+		return 0
+	fi
+
+	return 1
+}
+
+
+geth_kill()
+{
+	geth_pid && kill -SIGQUIT $(geth_pid) || pkill -SIGQUIT 'geth$'
+}
+
+
+geth_peercount()
+{
+	PEER_COUNT=0
+
+#	if ! geth_pid >/dev/null 2>&1
+#	then
+#		echo $PEER_COUNT
+#		return 1
+#	fi
+
+	if PEER_COUNT=$(curl --speed-limit 1 --speed-time 30 -sL http://127.0.0.1:8545 -X POST --data '{"jsonrpc":"2.0","method":"net_peerCount","params":[],"id":1}' | jq -r '.result' ; exit $(( $PIPESTATUS + $? )) )
+	then
+		echo $(( PEER_COUNT ))
+		return 0
+	fi
+
+	return 1
+}
+
+
+geth_unlockaccount_geth()
+{
+	R=$(geth --exec personal.unlockAccount\(\"$(read_account)\",\"$(cat $COLONUS_DIR/passwd)\",0\) attach rpc:http://127.0.0.1:8545)
+
+	if [ "$R" = "true" ]
+	then
+		return 0
+	fi
+
+	return 1
+}
+
+
+geth_unlockaccount()
+{
+	ACCOUNT=$(read_account)
+	PASSWD=$(cat $COLONUS_DIR/passwd)
+
+	if R=$(curl --speed-limit 1 --speed-time 30 -sL http://127.0.0.1:8545 -X POST --data '{"jsonrpc":"2.0","method":"personal_unlockAccount","params":["'$ACCOUNT'","'$PASSWD'",0],"id":1}' | jq -r '.result' ; exit $(( $PIPESTATUS + $? )) )
+	then
+		if test -z "$R"
+		then
+			return 1
+		fi
+		if [ "$R" = "true" ]
+		then
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+
+geth_accountbalance()
+{
+	ACCOUNT=0x${1}
+
+	if R=$(curl --speed-limit 1 --speed-time 30 -sL http://127.0.0.1:8545 -X POST --data '{"jsonrpc":"2.0","method":"eth_getBalance","params":["'$ACCOUNT'","latest"],"id":1}' | jq -r '.result' ; exit $(( $PIPESTATUS + $? )) )
+	then
+		BAL=$(echo $R | tr 'a-f' 'A-F'| awk -Fx '{print $2}')
+		echo "ibase=16; $BAL" | bc
+		return 0
+	fi
+
+	echo 0
+	return 1
+}
+
+
+geth_pendingbalance()
+{
+	ACCOUNT=0x${1}
+
+	if R=$(curl --speed-limit 1 --speed-time 30 -sL http://127.0.0.1:8545 -X POST --data '{"jsonrpc":"2.0","method":"eth_getBalance","params":["'$ACCOUNT'","pending"],"id":1}' | jq -r '.result' ; exit $(( $PIPESTATUS + $? )) )
+	then
+		BAL=$(echo $R | tr 'a-f' 'A-F'| awk -Fx '{print $2}')
+		echo "ibase=16; $BAL" | bc
+		return 0
+	fi
+
+	echo 0
+	return 1
+}
+
+
+geth_getwhisperid()
+{
+	if R=$(curl --speed-limit 1 --speed-time 30 -sL http://127.0.0.1:8545 -X POST --data '{"jsonrpc":"2.0","method":"shh_newIdentity","params":[],"id":1}' | jq -r '.result' ; exit $(( $PIPESTATUS + $? )) )
+	then
+		echo $R
+		return 0
+	fi
+
+	return 1
+}
+
+
+geth_checkwhisperid()
+{
+	ID=$1
+
+	if R=$(curl --speed-limit 1 --speed-time 30 -sL http://127.0.0.1:8545 -X POST --data '{"jsonrpc":"2.0","method":"shh_hasIdentity","params":["'$ID'"],"id":1}' | jq -r '.result' ; exit $(( $PIPESTATUS + $? )) )
+	then
+		if test -z "$R"
+		then
+			return 1
+		fi
+		return 0
+	fi
+
+	return 1
+}

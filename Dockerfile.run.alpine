@@ -1,0 +1,14 @@
+
+ARG ARCH
+ARG PACKAGE
+ARG TAG
+
+RUN apk update && apk upgrade && apk add bash sed jq bc curl coreutils tar socat # vim perl gawk
+
+COPY $PACKAGE/$PACKAGE-$TAG-$ARCH /usr/local/bin/$PACKAGE
+COPY util/hex2string-$ARCH /usr/local/bin/hex2string
+COPY util/string2hex-$ARCH /usr/local/bin/string2hex
+COPY scripts/* /usr/local/bin/
+
+WORKDIR /
+

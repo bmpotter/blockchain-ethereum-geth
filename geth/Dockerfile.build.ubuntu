@@ -1,0 +1,28 @@
+
+ARG VERSION
+
+RUN apt-get update && apt-get -y install git make golang
+
+WORKDIR /tmp
+RUN git clone https://github.com/ethereum/go-ethereum.git
+WORKDIR go-ethereum
+
+#RUN git checkout -b release/1.5
+RUN git checkout v$VERSION
+
+COPY echokillerv2.patch /tmp/
+RUN echo $VERSION | grep "^1.5" && patch -p1 </tmp/echokillerv2.patch || true
+
+COPY echokiller.patch /tmp/
+RUN echo $VERSION | grep "^1.4" && patch -p1 </tmp/echokiller.patch || true
+
+#uncomment for miner hack
+#RUN perl -pi -e 's/3141592/62831853/' $(grep -rl 3141592 *)
+#COPY singleminerhack.patch /tmp/
+#RUN patch -p0 </tmp/singleminerhack.patch
+
+ENV GO15VENDOREXPERIMENT 1
+RUN make geth
+RUN cp build/bin/geth /usr/local/bin/geth
+RUN strip /usr/local/bin/geth
+

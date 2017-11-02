@@ -1,0 +1,20 @@
+*** eth/handler.go.ORIG	Sun Feb 26 22:42:28 2017
+--- eth/handler.go	Sun Feb 26 22:43:29 2017
+***************
+*** 656,662 ****
+  
+  	case msg.Code == TxMsg:
+  		// Transactions arrived, make sure we have a valid and fresh chain to handle them
+! 		if atomic.LoadUint32(&pm.synced) == 0 {
+  			break
+  		}
+  		// Transactions can be processed, parse all of them and deliver to the pool
+--- 656,663 ----
+  
+  	case msg.Code == TxMsg:
+  		// Transactions arrived, make sure we have a valid and fresh chain to handle them
+! 		// if atomic.LoadUint32(&pm.synced) == 0 {
+! 		if (pm.downloader.Synchronising() == true) {
+  			break
+  		}
+  		// Transactions can be processed, parse all of them and deliver to the pool
